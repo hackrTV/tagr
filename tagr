@@ -1,0 +1,276 @@
+#!/bin/bash
+
+# tagr - Simple text interface for editing FLAC and Ogg Vorbis metadata tags
+
+set -e
+
+# Default values
+RECURSIVE=false
+TARGET_DIR="."
+
+# Common tags to edit
+TAGS=("TITLE" "ARTIST" "ALBUM" "ALBUMARTIST" "DATE" "TRACKNUMBER" "GENRE" "COMMENT")
+
+usage() {
+    echo "Usage: $(basename "$0") [-r|-R] [directory]"
+    echo ""
+    echo "Options:"
+    echo "  -r, -R    Recurse into subdirectories"
+    echo "  -h        Show this help message"
+    echo ""
+    echo "If no directory is specified, the current directory is used."
+    exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -r|-R)
+            RECURSIVE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            TARGET_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+# Verify directory exists
+if [[ ! -d "$TARGET_DIR" ]]; then
+    echo "Error: Directory '$TARGET_DIR' does not exist." >&2
+    exit 1
+fi
+
+# Check for required tools
+check_dependencies() {
+    local missing=()
+    if ! command -v metaflac &>/dev/null; then
+        missing+=("metaflac (from flac package)")
+    fi
+    if ! command -v vorbiscomment &>/dev/null; then
+        missing+=("vorbiscomment (from vorbis-tools package)")
+    fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: Missing required tools:" >&2
+        for tool in "${missing[@]}"; do
+            echo "  - $tool" >&2
+        done
+        exit 1
+    fi
+}
+
+check_dependencies
+
+# Get tag value from a file
+get_tag() {
+    local file="$1"
+    local tag="$2"
+    local ext="${file##*.}"
+    ext="${ext,,}"  # lowercase
+
+    case "$ext" in
+        flac)
+            metaflac --show-tag="$tag" "$file" 2>/dev/null | sed "s/^${tag}=//i"
+            ;;
+        ogg|oga)
+            vorbiscomment -l "$file" 2>/dev/null | grep -i "^${tag}=" | sed "s/^${tag}=//i"
+            ;;
+    esac
+}
+
+# Get all tags from a file
+get_all_tags() {
+    local file="$1"
+    local ext="${file##*.}"
+    ext="${ext,,}"
+
+    case "$ext" in
+        flac)
+            metaflac --export-tags-to=- "$file" 2>/dev/null
+            ;;
+        ogg|oga)
+            vorbiscomment -l "$file" 2>/dev/null
+            ;;
+    esac
+}
+
+# Set a tag on a file
+set_tag() {
+    local file="$1"
+    local tag="$2"
+    local value="$3"
+    local ext="${file##*.}"
+    ext="${ext,,}"
+
+    case "$ext" in
+        flac)
+            metaflac --remove-tag="$tag" "$file" 2>/dev/null || true
+            if [[ -n "$value" ]]; then
+                metaflac --set-tag="${tag}=${value}" "$file"
+            fi
+            ;;
+        ogg|oga)
+            # vorbiscomment requires exporting all tags, modifying, and re-importing
+            local tmpfile
+            tmpfile=$(mktemp)
+            vorbiscomment -l "$file" | grep -vi "^${tag}=" > "$tmpfile" || true
+            if [[ -n "$value" ]]; then
+                echo "${tag}=${value}" >> "$tmpfile"
+            fi
+            vorbiscomment -w -c "$tmpfile" "$file"
+            rm -f "$tmpfile"
+            ;;
+    esac
+}
+
+# Display current tags for a file
+display_tags() {
+    local file="$1"
+    echo ""
+    echo "Current tags:"
+    echo "----------------------------------------"
+    local i=1
+    for tag in "${TAGS[@]}"; do
+        local value
+        value=$(get_tag "$file" "$tag")
+        printf "  %d. %-12s: %s\n" "$i" "$tag" "$value"
+        ((i++))
+    done
+    echo "----------------------------------------"
+    echo ""
+    echo "Other tags in file:"
+    local other_tags
+    other_tags=$(get_all_tags "$file" | grep -viE "^($(IFS='|'; echo "${TAGS[*]}"))=" || true)
+    if [[ -n "$other_tags" ]]; then
+        echo "$other_tags" | sed 's/^/  /'
+    else
+        echo "  (none)"
+    fi
+    echo ""
+}
+
+# Edit tags for a single file
+edit_file() {
+    local file="$1"
+    local filename
+    filename=$(basename "$file")
+
+    while true; do
+        clear
+        echo "============================================"
+        echo "File: $file"
+        echo "============================================"
+
+        display_tags "$file"
+
+        echo "Commands:"
+        echo "  1-${#TAGS[@]}  Edit tag by number"
+        echo "  a      Add custom tag"
+        echo "  d      Delete a tag"
+        echo "  n      Next file (skip)"
+        echo "  q      Quit"
+        echo ""
+        read -r -p "Enter command: " cmd
+
+        case "$cmd" in
+            [1-8])
+                local idx=$((cmd - 1))
+                if [[ $idx -lt ${#TAGS[@]} ]]; then
+                    local tag="${TAGS[$idx]}"
+                    local current
+                    current=$(get_tag "$file" "$tag")
+                    echo ""
+                    echo "Editing $tag (current: $current)"
+                    echo "Enter new value (empty to clear, or press Ctrl+C to cancel):"
+                    read -r -p "> " new_value
+                    set_tag "$file" "$tag" "$new_value"
+                    echo "Tag updated."
+                    sleep 0.5
+                fi
+                ;;
+            a|A)
+                echo ""
+                read -r -p "Enter tag name: " tag_name
+                if [[ -n "$tag_name" ]]; then
+                    tag_name="${tag_name^^}"  # uppercase
+                    read -r -p "Enter value: " tag_value
+                    set_tag "$file" "$tag_name" "$tag_value"
+                    echo "Tag added."
+                    sleep 0.5
+                fi
+                ;;
+            d|D)
+                echo ""
+                read -r -p "Enter tag name to delete: " tag_name
+                if [[ -n "$tag_name" ]]; then
+                    tag_name="${tag_name^^}"
+                    set_tag "$file" "$tag_name" ""
+                    echo "Tag deleted."
+                    sleep 0.5
+                fi
+                ;;
+            n|N)
+                return 0
+                ;;
+            q|Q)
+                echo "Exiting..."
+                exit 0
+                ;;
+            *)
+                echo "Unknown command: $cmd"
+                sleep 0.5
+                ;;
+        esac
+    done
+}
+
+# Find files
+find_files() {
+    local dir="$1"
+    if [[ "$RECURSIVE" == true ]]; then
+        find "$dir" -type f \( -iname "*.flac" -o -iname "*.ogg" -o -iname "*.oga" \) | sort
+    else
+        find "$dir" -maxdepth 1 -type f \( -iname "*.flac" -o -iname "*.ogg" -o -iname "*.oga" \) | sort
+    fi
+}
+
+# Main loop
+main() {
+    local files
+    mapfile -t files < <(find_files "$TARGET_DIR")
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "No FLAC or Ogg Vorbis files found in '$TARGET_DIR'"
+        if [[ "$RECURSIVE" == false ]]; then
+            echo "Tip: Use -r flag to search subdirectories"
+        fi
+        exit 0
+    fi
+
+    echo "Found ${#files[@]} file(s) to process."
+    echo "Press Enter to start..."
+    read -r
+
+    local current=1
+    local total=${#files[@]}
+
+    for file in "${files[@]}"; do
+        echo ""
+        echo "[$current/$total] Processing: $file"
+        edit_file "$file"
+        ((current++))
+    done
+
+    echo ""
+    echo "All files processed!"
+}
+
+main
