@@ -157,9 +157,44 @@ display_tags() {
     echo ""
 }
 
+# Apply tag to remaining files in queue
+apply_to_remaining() {
+    local tag="$1"
+    local value="$2"
+    shift 2
+    local remaining_files=("$@")
+
+    for f in "${remaining_files[@]}"; do
+        set_tag "$f" "$tag" "$value"
+    done
+    echo "Applied $tag to ${#remaining_files[@]} remaining file(s)."
+}
+
+# Prompt to apply tag to all remaining files
+prompt_apply_to_all() {
+    local tag="$1"
+    local value="$2"
+    shift 2
+    local remaining_files=("$@")
+
+    if [[ ${#remaining_files[@]} -eq 0 ]]; then
+        return
+    fi
+
+    read -r -p "Apply this value to all ${#remaining_files[@]} remaining file(s)? [y/N] " response
+    case "$response" in
+        [yY]|[yY][eE][sS])
+            apply_to_remaining "$tag" "$value" "${remaining_files[@]}"
+            ;;
+    esac
+}
+
 # Edit tags for a single file
+# Arguments: file, remaining_files...
 edit_file() {
     local file="$1"
+    shift
+    local remaining_files=("$@")
     local filename
     filename=$(basename "$file")
 
@@ -193,6 +228,7 @@ edit_file() {
                     read -r -p "> " new_value
                     set_tag "$file" "$tag" "$new_value"
                     echo "Tag updated."
+                    prompt_apply_to_all "$tag" "$new_value" "${remaining_files[@]}"
                     sleep 0.5
                 fi
                 ;;
@@ -204,6 +240,7 @@ edit_file() {
                     read -r -p "Enter value: " tag_value
                     set_tag "$file" "$tag_name" "$tag_value"
                     echo "Tag added."
+                    prompt_apply_to_all "$tag_name" "$tag_value" "${remaining_files[@]}"
                     sleep 0.5
                 fi
                 ;;
@@ -214,6 +251,7 @@ edit_file() {
                     tag_name="${tag_name^^}"
                     set_tag "$file" "$tag_name" ""
                     echo "Tag deleted."
+                    prompt_apply_to_all "$tag_name" "" "${remaining_files[@]}"
                     sleep 0.5
                 fi
                 ;;
@@ -259,14 +297,16 @@ main() {
     echo "Press Enter to start..."
     read -r
 
-    local current=1
+    local current=0
     local total=${#files[@]}
 
-    for file in "${files[@]}"; do
+    while [[ $current -lt $total ]]; do
+        local file="${files[$current]}"
+        local remaining_files=("${files[@]:$((current + 1))}")
         echo ""
-        echo "[$current/$total] Processing: $file"
-        edit_file "$file"
-        ((current++))
+        echo "[$((current + 1))/$total] Processing: $file"
+        edit_file "$file" "${remaining_files[@]}"
+        ((++current))
     done
 
     echo ""
